@@ -15,3 +15,5 @@ vortex_kit
 agent_skill
 aggregation
 microstructure
+tests
+*.ipynb

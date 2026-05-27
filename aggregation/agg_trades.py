@@ -1,7 +1,7 @@
 """
 Aggregate raw trades into aggTrades.
 
-Binance aggTrades group consecutive trades that share the same
+in Exchanges aggTrades group consecutive trades that share the same
 ``price``, ``timestamp``, and ``is_buyer_maker`` flag. Each group
 represents a single order execution at the same price and side.
 

@@ -16,7 +16,7 @@ throughout the entire pipeline.
 from __future__ import annotations
 
 from enum import Enum
-from typing import Optional
+from typing import Optional, cast
 
 import polars as pl
 
@@ -72,7 +72,10 @@ def detect_timestamp_precision(
 
     n = min(sample_size, len(series))
     sampled = series.sample(n, seed=42) if len(series) > n else series
-    median_val = float(sampled.median())
+    median = sampled.median()
+    if median is None:
+        raise ValueError("Cannot detect precision on a timestamp series with no median")
+    median_val = float(cast(int | float, median))
 
     if median_val <= 0:
         raise ValueError(f"Unexpected timestamp values (median={median_val})")
@@ -92,10 +95,11 @@ def detect_timestamp_precision(
 # Interval helpers
 # ---------------------------------------------------------------------------
 def _parse_interval_seconds(interval: str) -> int:
-    """Parse a Binance-style interval string into seconds.
+    """Parse a fixed-duration interval string into seconds.
 
     Supported formats: ``"1m"``, ``"5m"``, ``"15m"``, ``"1h"``, ``"4h"``,
-    ``"1d"``, ``"1w"``, ``"1M"``.
+    ``"1d"``, and ``"1w"``. Calendar-month intervals are intentionally not
+    supported because their duration depends on the calendar month.
 
     Args:
         interval: Interval string (e.g. ``"5m"``, ``"1h"``).
@@ -111,7 +115,6 @@ def _parse_interval_seconds(interval: str) -> int:
         "h": 3_600,       # seconds per hour
         "d": 86_400,      # seconds per day
         "w": 604_800,     # seconds per week
-        "M": 2_629_746,   # average seconds per month (30.44 days)
     }
 
     if len(interval) < 2:
@@ -119,6 +122,11 @@ def _parse_interval_seconds(interval: str) -> int:
 
     unit = interval[-1]
     if unit not in units:
+        if unit == "M":
+            raise ValueError(
+                "Calendar-month intervals are not supported because their "
+                "duration is not fixed."
+            )
         raise ValueError(
             f"Unknown interval unit '{unit}'. Supported: {list(units.keys())}"
         )
@@ -135,7 +143,7 @@ def interval_to_unit(
     interval: str,
     precision: TimestampPrecision,
 ) -> int:
-    """Convert a Binance-style interval string to the given timestamp unit.
+    """Convert interval string to timestamp unit.
 
     This is the key function for precision-preserving interval arithmetic.
     The returned value is in the same unit as the data's timestamps, so

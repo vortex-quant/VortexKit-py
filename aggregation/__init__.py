@@ -2,23 +2,29 @@
 VortexKit Aggregation Module
 =============================
 
-Institutional-grade trade data aggregation for cryptocurrency markets.
+data aggregation for financial markets data.
 
 Supports:
-- Loading headerless CSV files from Binance (and other exchanges)
+- Loading headerless CSV files from exchanges
+- Normalizing loaded trade datasets into exchange-neutral kline input
 - Aggregating raw trades → aggTrades (compressed trades)
-- Aggregating raw trades → klines (OHLCV candles) at any interval
+- Aggregating raw trades → klines (OHLCV candles) at fixed intervals
 
-All timestamps are handled as unix-based integers in their **native precision**
-(seconds, milliseconds, or microseconds). No forced conversion is performed —
+All timestamps are handled as unix-based integers in their native precision without any assumptions about the unit
+(seconds, milliseconds, or microseconds). No forced conversion is performed
 data stays in its original unit throughout the pipeline.
 
 Quick start::
 
-    from aggregation import load_trades, aggregate_trades, aggregate_klines
+    import polars as pl
+    from aggregation import TradeColumnMapping, normalize_trades, aggregate_klines
 
-    trades = load_trades("dataset/BTCUSDT-trades-2026-04-10.csv")
-    agg = aggregate_trades(trades)
+    raw = pl.read_parquet("dataset/trades.parquet")
+    trades = normalize_trades(raw, TradeColumnMapping(
+        timestamp="timestamp",
+        price="price",
+        quantity="volume",
+    ))
     klines_5m = aggregate_klines(trades, interval="5m")
     klines_1h = aggregate_klines(trades, interval="1h")
 """
@@ -31,9 +37,12 @@ from .schemas import (
     BINANCE_SCHEMA,
     BYBIT_SCHEMA,
     KLINES_CANONICAL,
+    NORMALIZED_TRADES_CANONICAL,
     TRADES_CANONICAL,
     ExchangeSchema,
+    TradeColumnMapping,
     get_schema,
+    normalize_trades,
     register_schema,
 )
 from .utils import (
@@ -53,6 +62,9 @@ __all__ = [
     # Aggregation
     "aggregate_trades",
     "aggregate_klines",
+    "normalize_trades",
+    "TradeColumnMapping",
+    "NORMALIZED_TRADES_CANONICAL",
     # Schemas
     "ExchangeSchema",
     "BINANCE_SCHEMA",

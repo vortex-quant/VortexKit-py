@@ -42,9 +42,12 @@ def _apply_schema(
     rename_map = {f"column_{i+1}": name for i, name in enumerate(canonical_names)}
     df = df.rename(rename_map)
 
-    # Cast dtypes (only columns that exist)
-    casts = {col: dtype for col, dtype in dtype_map.items() if col in df.columns}
-    df = df.cast(casts)
+    # Cast dtypes (only columns that exist).
+    df = df.with_columns(
+        pl.col(col).cast(dtype).alias(col)
+        for col, dtype in dtype_map.items()
+        if col in df.columns
+    )
 
     # Reorder columns to canonical order
     df = df.select([c for c in canonical_names if c in df.columns])
