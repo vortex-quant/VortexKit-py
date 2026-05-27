@@ -9,7 +9,9 @@ __pycache__
 .vscode/
 docs
 
-dataset/
+dataset
 *.md
 vortex_kit
 agent_skill
+aggregation
+microstructure
