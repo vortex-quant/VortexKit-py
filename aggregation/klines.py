@@ -2,9 +2,8 @@
 Aggregate trades into klines (candlestick / OHLCV data).
 
 Klines (also called candles or OHLCV bars) are produced by bucketing
-trades into fixed time intervals. This module supports fixed-duration
-intervals expressible as Binance-style strings, such as ``"1m"``,
-``"5m"``, ``"1h"``, and ``"1d"``.
+trades into fixed time intervals. Intervals can be strings such as
+``"2.5m"`` and ``"20s"``, or numeric values paired with ``interval_scale``.
 
 The output schema matches the Binance klines format exactly:
 
@@ -33,7 +32,12 @@ from typing import Literal, Optional, Union, overload
 import polars as pl
 
 from .schemas import KLINES_CANONICAL, TradeColumnMapping, normalize_trades
-from .utils import TimestampPrecision, detect_timestamp_precision, interval_to_unit
+from .utils import (
+    IntervalValue,
+    TimestampPrecision,
+    detect_timestamp_precision,
+    interval_to_unit,
+)
 
 
 DataFrameLike = Union[pl.DataFrame, pl.LazyFrame]
@@ -45,8 +49,9 @@ _ROUND_PLACES = 8
 
 def aggregate_klines(
     trades: DataFrameLike,
-    interval: str = "5m",
+    interval: IntervalValue = 5,
     precision: Optional[TimestampPrecision] = None,
+    interval_scale: str = "m",
 ) -> DataFrameLike:
     """Aggregate trades into klines for a fixed time interval.
 
@@ -59,9 +64,11 @@ def aggregate_klines(
             (``timestamp``, ``price``, ``quantity``, ``quote_quantity``,
             ``sequence_id``) or legacy columns (``time``, ``price``, ``qty``,
             ``quote_qty``, ``trade_id``).
-        interval: Fixed-duration interval string (for example ``"1m"``,
-            ``"5m"``, ``"1h"``, ``"1d"``, ``"1w"``). Calendar-month
-            intervals are rejected because their duration is not fixed.
+        interval: Fixed-duration interval. Use a compact string such as
+            ``"2.5m"`` or a number with ``interval_scale``.
+        interval_scale: Unit for numeric intervals. Supports seconds,
+            minutes, hours, days, and weeks using common aliases such as
+            ``"s"``, ``"m"``, ``"h"``, ``"d"``, and ``"w"``.
         precision: Timestamp precision of the timestamp column. If ``None``,
             it is auto-detected from integer timestamp magnitude.
 
@@ -82,7 +89,7 @@ def aggregate_klines(
     if precision is None:
         precision = _detect_precision(trades, cols.timestamp)
 
-    interval_ticks = interval_to_unit(interval, precision)
+    interval_ticks = interval_to_unit(interval, precision, interval_scale)
     t = _canonicalize_trade_columns(trades, schema, cols)
     t = t.sort(["timestamp", "sequence_id", "_source_row"]).with_columns(
         (pl.col("timestamp") // interval_ticks * interval_ticks).alias("open_time")

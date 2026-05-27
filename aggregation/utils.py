@@ -15,8 +15,9 @@ throughout the entire pipeline.
 
 from __future__ import annotations
 
+from decimal import Decimal, InvalidOperation
 from enum import Enum
-from typing import Optional, cast
+from typing import Optional, Union, cast
 
 import polars as pl
 
@@ -125,64 +126,56 @@ def _max_scaled_rounding_error(series: pl.Series, multiplier: int) -> float:
 # ---------------------------------------------------------------------------
 # Interval helpers
 # ---------------------------------------------------------------------------
-def _parse_interval_seconds(interval: str) -> int:
-    """Parse a fixed-duration interval string into seconds.
+IntervalValue = Union[int, float, str]
 
-    Supported formats: ``"1m"``, ``"5m"``, ``"15m"``, ``"1h"``, ``"4h"``,
-    ``"1d"``, and ``"1w"``. Calendar-month intervals are intentionally not
-    supported because their duration depends on the calendar month.
-
-    Args:
-        interval: Interval string (e.g. ``"5m"``, ``"1h"``).
-
-    Returns:
-        Interval duration in seconds.
-
-    Raises:
-        ValueError: If the interval format is not recognised.
-    """
-    units = {
-        "m": 60,          # seconds per minute
-        "h": 3_600,       # seconds per hour
-        "d": 86_400,      # seconds per day
-        "w": 604_800,     # seconds per week
-    }
-
-    if len(interval) < 2:
-        raise ValueError(f"Invalid interval format: '{interval}'")
-
-    unit = interval[-1]
-    if unit not in units:
-        if unit == "M":
-            raise ValueError(
-                "Calendar-month intervals are not supported because their "
-                "duration is not fixed."
-            )
-        raise ValueError(
-            f"Unknown interval unit '{unit}'. Supported: {list(units.keys())}"
-        )
-
-    try:
-        amount = int(interval[:-1])
-    except ValueError:
-        raise ValueError(f"Invalid interval amount in '{interval}'")
-
-    return amount * units[unit]
+_SECONDS_PER_INTERVAL_SCALE: dict[str, Decimal] = {
+    "s": Decimal("1"),
+    "sec": Decimal("1"),
+    "secs": Decimal("1"),
+    "second": Decimal("1"),
+    "seconds": Decimal("1"),
+    "m": Decimal("60"),
+    "min": Decimal("60"),
+    "mins": Decimal("60"),
+    "minute": Decimal("60"),
+    "minutes": Decimal("60"),
+    "h": Decimal("3600"),
+    "hr": Decimal("3600"),
+    "hrs": Decimal("3600"),
+    "hour": Decimal("3600"),
+    "hours": Decimal("3600"),
+    "d": Decimal("86400"),
+    "day": Decimal("86400"),
+    "days": Decimal("86400"),
+    "w": Decimal("604800"),
+    "wk": Decimal("604800"),
+    "wks": Decimal("604800"),
+    "week": Decimal("604800"),
+    "weeks": Decimal("604800"),
+}
 
 
 def interval_to_unit(
-    interval: str,
+    interval: IntervalValue,
     precision: TimestampPrecision,
+    interval_scale: str = "m",
 ) -> int:
-    """Convert interval string to timestamp unit.
+    """Convert a custom interval to the timestamp unit used by the data.
 
-    This is the key function for precision-preserving interval arithmetic.
-    The returned value is in the same unit as the data's timestamps, so
-    floor-alignment and close_time calculations stay in native precision.
+    ``interval`` may be a compact string with its unit, such as ``"2.5m"``,
+    ``"20s"``, or ``"1.1h"``. It may also be numeric; in that case
+    ``interval_scale`` supplies the unit, for example ``interval=20`` and
+    ``interval_scale="s"``.
+
+    Decimal arithmetic is used to avoid float drift. The result must be an
+    exact integer number of timestamp ticks; otherwise the interval cannot be
+    represented accurately at the requested timestamp precision.
 
     Args:
-        interval: Interval string (e.g. ``"5m"``, ``"1h"``).
+        interval: Interval amount, or compact interval string.
         precision: The timestamp precision to convert to.
+        interval_scale: Unit for numeric intervals. Supported units are
+            seconds, minutes, hours, days, and weeks using common aliases.
 
     Returns:
         Interval duration in the specified unit.
@@ -190,26 +183,93 @@ def interval_to_unit(
     Example::
 
         interval_to_unit("5m", TimestampPrecision.MICROSECONDS)  # 300_000_000
-        interval_to_unit("5m", TimestampPrecision.MILLISECONDS)  # 300_000
-        interval_to_unit("5m", TimestampPrecision.SECONDS)       # 300
+        interval_to_unit("2.5m", TimestampPrecision.MILLISECONDS)  # 150_000
+        interval_to_unit(20, TimestampPrecision.SECONDS, "s")      # 20
     """
-    seconds = _parse_interval_seconds(interval)
-    return seconds * _SECONDS_PER_UNIT[precision]
+    seconds = _interval_seconds(interval, interval_scale)
+    ticks = seconds * Decimal(_SECONDS_PER_UNIT[precision])
+    integer_ticks = ticks.to_integral_value()
+    if ticks != integer_ticks:
+        raise ValueError(
+            f"Interval {interval!r} {interval_scale!r} is {ticks} ticks at "
+            f"{precision.value} precision, which cannot be represented exactly."
+        )
+    if integer_ticks <= 0:
+        raise ValueError("Interval must be greater than zero")
+    return int(integer_ticks)
 
 
-def interval_to_microseconds(interval: str) -> int:
-    """Convert a Binance-style interval string to microseconds.
+def _interval_seconds(interval: IntervalValue, interval_scale: str) -> Decimal:
+    """Return interval duration in seconds as an exact Decimal."""
+    if isinstance(interval, str):
+        amount, scale = _split_interval_string(interval, interval_scale)
+    else:
+        amount = _decimal_from_value(interval)
+        scale = interval_scale
+
+    if amount <= 0:
+        raise ValueError("Interval must be greater than zero")
+    return amount * _seconds_per_scale(scale)
+
+
+def _split_interval_string(
+    interval: str,
+    default_scale: str,
+) -> tuple[Decimal, str]:
+    """Split strings such as '2.5m' or '20 sec' into amount and scale."""
+    compact = interval.strip().replace(" ", "")
+    if not compact:
+        raise ValueError("Interval cannot be empty")
+
+    split_at = len(compact)
+    while split_at > 0 and compact[split_at - 1].isalpha():
+        split_at -= 1
+
+    amount_text = compact[:split_at]
+    scale = compact[split_at:] or default_scale
+    return _decimal_from_value(amount_text), scale
+
+
+def _decimal_from_value(value: int | float | str) -> Decimal:
+    """Convert an interval value to Decimal without binary float artifacts."""
+    try:
+        return Decimal(str(value))
+    except InvalidOperation as exc:
+        raise ValueError(f"Invalid interval amount: {value!r}") from exc
+
+
+def _seconds_per_scale(scale: str) -> Decimal:
+    """Return the number of seconds for an interval scale alias."""
+    if scale == "M" or scale.lower() in {"mo", "mon", "month", "months"}:
+        raise ValueError(
+            "Calendar-month intervals are not supported because their duration "
+            "is not fixed."
+        )
+
+    key = scale.lower()
+    if key not in _SECONDS_PER_INTERVAL_SCALE:
+        supported = ", ".join(["s", "m", "h", "d", "w"])
+        raise ValueError(f"Unknown interval scale '{scale}'. Supported: {supported}")
+    return _SECONDS_PER_INTERVAL_SCALE[key]
+
+
+def interval_to_microseconds(
+    interval: IntervalValue,
+    interval_scale: str = "m",
+) -> int:
+    """Convert a custom interval to microseconds.
 
     Convenience wrapper around :func:`interval_to_unit` for the
     microseconds precision. Kept for backward compatibility.
 
     Args:
-        interval: Interval string (e.g. ``"5m"``, ``"1h"``).
+        interval: Interval amount, or compact interval string.
+        interval_scale: Unit for numeric intervals.
 
     Returns:
         Interval duration in microseconds.
     """
-    return interval_to_unit(interval, TimestampPrecision.MICROSECONDS)
+    return interval_to_unit(interval, TimestampPrecision.MICROSECONDS, interval_scale)
 
 
 def compute_kline_times(

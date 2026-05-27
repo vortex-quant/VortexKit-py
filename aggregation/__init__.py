@@ -26,6 +26,7 @@ Quick start::
         quantity="volume",
     ))
     klines_5m = aggregate_klines(trades, interval="5m")
+    klines_20s = aggregate_klines(trades, interval=20, interval_scale="s")
     klines_1h = aggregate_klines(trades, interval="1h")
 """
 
