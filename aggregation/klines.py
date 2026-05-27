@@ -32,7 +32,7 @@ from typing import Literal, Optional, Union, overload
 
 import polars as pl
 
-from .schemas import KLINES_CANONICAL
+from .schemas import KLINES_CANONICAL, TradeColumnMapping, normalize_trades
 from .utils import TimestampPrecision, detect_timestamp_precision, interval_to_unit
 
 
@@ -73,6 +73,10 @@ def aggregate_klines(
         raise TypeError("trades must be a polars DataFrame or LazyFrame")
 
     schema = _collect_schema(trades)
+    if not _has_kline_trade_columns(schema):
+        trades = normalize_trades(trades, _infer_kline_mapping(schema))
+        schema = _collect_schema(trades)
+
     cols = _resolve_trade_columns(schema)
 
     if precision is None:
@@ -149,6 +153,85 @@ def _to_lazy(data: DataFrameLike) -> pl.LazyFrame:
     return data if isinstance(data, pl.LazyFrame) else data.lazy()
 
 
+def _has_kline_trade_columns(schema: pl.Schema) -> bool:
+    """Return true when data is already normalized or legacy-canonical."""
+    columns = set(schema.keys())
+    return (
+        _first_available(columns, "timestamp", "time", required=False) is not None
+        and "price" in columns
+        and _first_available(columns, "quantity", "qty", required=False) is not None
+    )
+
+
+def _infer_kline_mapping(schema: pl.Schema) -> TradeColumnMapping:
+    """Infer an accurate mapping for common raw trade schemas."""
+    columns = list(schema.keys())
+    timestamp = _match_column(columns, ["timestamp", "time", "ts"], "timestamp")
+    price = _match_column(columns, ["price", "tradePrice", "execPrice"], "price")
+
+    # homeNotional/foreignNotional is an exchange-native base/quote pair.
+    # Prefer it over size because size may be contracts on some venues.
+    if _has_columns(columns, "homeNotional", "foreignNotional"):
+        quantity = _match_column(columns, ["homeNotional"], "quantity")
+        quote_quantity = _match_column(columns, ["foreignNotional"], "quote_quantity")
+    else:
+        quantity = _match_column(
+            columns,
+            ["quantity", "qty", "volume", "baseQuantity", "baseQty", "size"],
+            "quantity",
+        )
+        quote_quantity = _match_column(
+            columns,
+            [
+                "quote_quantity",
+                "quote_qty",
+                "quoteQty",
+                "quoteVolume",
+                "quoteNotional",
+                "foreignNotional",
+                "execValue",
+                "notional",
+            ],
+            "quote_quantity",
+            required=False,
+        )
+
+    side = _match_column(
+        columns,
+        ["is_buyer_maker", "isBuyerMaker", "side", "takerSide", "tradeSide"],
+        "side",
+        required=False,
+    )
+    trade_id = _match_column(
+        columns,
+        ["trade_id", "trade Id", "tradeId", "id", "execId", "trdMatchID"],
+        "trade_id",
+        required=False,
+    )
+    symbol = _match_column(
+        columns,
+        ["symbol", "pair", "instrument", "instrumentName"],
+        "symbol",
+        required=False,
+    )
+    side_semantics = (
+        "is_buyer_maker"
+        if side is not None and _normalize_name(side) in {"isbuyermaker"}
+        else "taker"
+    )
+
+    return TradeColumnMapping(
+        timestamp=timestamp,
+        price=price,
+        quantity=quantity,
+        quote_quantity=quote_quantity,
+        side=side,
+        trade_id=trade_id,
+        symbol=symbol,
+        side_semantics=side_semantics,
+    )
+
+
 def _resolve_trade_columns(schema: pl.Schema) -> _TradeColumns:
     """Resolve normalized and legacy trade column names."""
     columns = set(schema.keys())
@@ -208,6 +291,62 @@ def _first_available(
         names = ", ".join(candidates)
         raise ValueError(f"Trades data is missing required column: one of {names}")
     return None
+
+
+@overload
+def _match_column(
+    columns: list[str],
+    aliases: list[str],
+    field_name: str,
+    *,
+    required: Literal[True] = True,
+) -> str:
+    ...
+
+
+@overload
+def _match_column(
+    columns: list[str],
+    aliases: list[str],
+    field_name: str,
+    *,
+    required: Literal[False],
+) -> str | None:
+    ...
+
+
+def _match_column(
+    columns: list[str],
+    aliases: list[str],
+    field_name: str,
+    *,
+    required: bool = True,
+) -> str | None:
+    """Find one unambiguous source column by normalized aliases."""
+    normalized_aliases = {_normalize_name(alias) for alias in aliases}
+    matches = [col for col in columns if _normalize_name(col) in normalized_aliases]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        raise ValueError(
+            f"Raw trades data has ambiguous {field_name} columns {matches}; "
+            "call normalize_trades with an explicit TradeColumnMapping."
+        )
+    if required:
+        names = ", ".join(aliases)
+        raise ValueError(f"Raw trades data is missing required {field_name}: {names}")
+    return None
+
+
+def _has_columns(columns: list[str], *required: str) -> bool:
+    """Return true when all required normalized column names are present."""
+    normalized_columns = {_normalize_name(col) for col in columns}
+    return all(_normalize_name(col) in normalized_columns for col in required)
+
+
+def _normalize_name(name: str) -> str:
+    """Normalize column names for source-schema matching."""
+    return "".join(char for char in name.lower() if char.isalnum())
 
 
 def _detect_precision(data: DataFrameLike, timestamp_col: str) -> TimestampPrecision:

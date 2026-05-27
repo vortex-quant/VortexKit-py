@@ -16,4 +16,4 @@ agent_skill
 aggregation
 microstructure
 tests
-*.ipynb
+# *.ipynb
