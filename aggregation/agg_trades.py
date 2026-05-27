@@ -14,9 +14,9 @@ Binance aggTrades file (typically <0.1% difference). The aggregated
 quantities, however, remain identical — the split rows are simply
 combined.
 
-The input DataFrame must use canonical column names as defined in
-:mod:`aggregation.schemas` (i.e. as returned by
-:func:`aggregation.loaders.load_trades`).
+The input DataFrame must use the legacy raw-trade column names
+``trade_id``, ``price``, ``qty``, ``time``, ``is_buyer_maker``, and
+``is_best_match``.
 """
 
 from __future__ import annotations
