@@ -49,16 +49,21 @@ def detect_timestamp_precision(
     series: pl.Series,
     sample_size: int = 1000,
 ) -> TimestampPrecision:
-    """Detect whether a timestamp series is in seconds, milliseconds, or microseconds.
+    """Detect whether timestamps should be handled as seconds, ms, or us.
 
-    Heuristic based on median value magnitude:
+    Integer timestamps are detected by median value magnitude:
 
     - **Seconds**: ~1.77 × 10⁹ (10 digits)
     - **Milliseconds**: ~1.77 × 10¹² (13 digits)
     - **Microseconds**: ~1.77 × 10¹⁵ (16 digits)
 
+    Float timestamps in Unix seconds are additionally checked for fractional
+    precision. For example, ``1777852800.082`` is stored in seconds but must
+    be handled at millisecond precision, while ``1779235200.2682`` requires
+    microsecond precision.
+
     Args:
-        series: A polars Int64 series of timestamps.
+        series: A numeric Polars series of Unix timestamps.
         sample_size: Number of rows to sample for detection.
 
     Returns:
@@ -80,6 +85,9 @@ def detect_timestamp_precision(
     if median_val <= 0:
         raise ValueError(f"Unexpected timestamp values (median={median_val})")
 
+    if series.dtype.is_float() and 1e8 <= median_val < 1e11:
+        return _detect_fractional_second_precision(sampled)
+
     # 10^14 ≈ year 5138 in ms, so anything >= 10^14 must be microseconds
     if median_val >= 1e14:
         return TimestampPrecision.MICROSECONDS
@@ -89,6 +97,29 @@ def detect_timestamp_precision(
         return TimestampPrecision.SECONDS
     else:
         raise ValueError(f"Cannot determine timestamp precision (median={median_val})")
+
+
+def _detect_fractional_second_precision(series: pl.Series) -> TimestampPrecision:
+    """Find the smallest integer unit that preserves float Unix seconds."""
+    if _max_scaled_rounding_error(series, 1) <= 1e-6:
+        return TimestampPrecision.SECONDS
+    if _max_scaled_rounding_error(series, 1_000) <= 1e-6:
+        return TimestampPrecision.MILLISECONDS
+    if _max_scaled_rounding_error(series, 1_000_000) <= 1e-6:
+        return TimestampPrecision.MICROSECONDS
+    raise ValueError(
+        "Float timestamp values cannot be represented losslessly at seconds, "
+        "milliseconds, or microseconds precision."
+    )
+
+
+def _max_scaled_rounding_error(series: pl.Series, multiplier: int) -> float:
+    """Return max error after scaling a float timestamp series to integers."""
+    scaled = series.cast(pl.Float64) * multiplier
+    error = (scaled - scaled.round(0)).abs().max()
+    if error is None:
+        raise ValueError("Cannot detect precision on a timestamp series with no data")
+    return float(cast(int | float, error))
 
 
 # ---------------------------------------------------------------------------
